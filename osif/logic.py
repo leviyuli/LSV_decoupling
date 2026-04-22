@@ -26,7 +26,7 @@ impedance.validation.eval = patched_eval
 class EisLogic:
     def __init__(self):
         # Matched to EIS ave.py settings
-        self.kk_threshold = 0.02
+        self.kk_threshold = 0.1
         self.outlier_z_threshold = 1.5
 
     # --- Preprocessing & KK ---
