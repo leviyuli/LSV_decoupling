@@ -29,6 +29,7 @@ class OsifUI(ttk.Frame):
         self.df_all_diagnostics = None
         self.df_avg = None
         self.processed_f = self.processed_zr = self.processed_zi = None
+        self.limit_kk_range_var = tk.BooleanVar(value=False)
 
         self.entries = {}
         self.se_labels = {}
@@ -106,6 +107,12 @@ class OsifUI(ttk.Frame):
         ttk.Label(freq_f, text="f_min (Hz)").grid(row=0, column=2, sticky="w", padx=(8, 2))
         self.ent_fmin = ttk.Entry(freq_f, width=10)
         self.ent_fmin.grid(row=0, column=3, sticky="ew", padx=2)
+
+        ttk.Checkbutton(
+            val_frame,
+            text="Limit KK to f_min/f_max",
+            variable=self.limit_kk_range_var,
+        ).pack(anchor="w", pady=(4, 2))
 
         hfr_f = ttk.Frame(val_frame)
         hfr_f.pack(fill=tk.X, pady=(8, 2))
@@ -279,12 +286,69 @@ class OsifUI(ttk.Frame):
     # ------------------------------------------------------------------
     # Preprocessing
     # ------------------------------------------------------------------
+    def _parse_kk_frequency_range(self):
+        def parse_optional(entry, name):
+            text = entry.get().strip()
+            if not text:
+                return None
+            try:
+                value = float(text)
+            except ValueError:
+                raise ValueError(f"{name} must be numeric or blank.") from None
+            if not np.isfinite(value):
+                raise ValueError(f"{name} must be a finite number.")
+            return value
+
+        fmax = parse_optional(self.ent_fmax, "f_max")
+        fmin = parse_optional(self.ent_fmin, "f_min")
+
+        if fmin is not None and fmax is not None and fmin > fmax:
+            raise ValueError("f_min must be less than or equal to f_max.")
+
+        if fmin is None and fmax is None:
+            return None
+
+        return fmin, fmax
+
+    def _update_frequency_entries_after_preprocess(self, suggested_min, suggested_max, freq_range):
+        if freq_range is None:
+            update_min = True
+            update_max = True
+        else:
+            requested_min, requested_max = freq_range
+            update_min = requested_min is None
+            update_max = requested_max is None
+
+        if update_max:
+            self.ent_fmax.delete(0, tk.END)
+            self.ent_fmax.insert(0, f"{suggested_max:.2f}")
+
+        if update_min:
+            self.ent_fmin.delete(0, tk.END)
+            self.ent_fmin.insert(0, f"{suggested_min:.2f}")
+
     def run_preprocessing(self):
         if not self.raw_data_list:
             messagebox.showwarning("Warning", "No files loaded. Please add files first.")
             return
 
-        df_all, df_avg, (fmin, fmax), rsd = self.logic.process_spectra(self.raw_data_list)
+        freq_range = None
+        if self.limit_kk_range_var.get():
+            try:
+                freq_range = self._parse_kk_frequency_range()
+            except ValueError as e:
+                messagebox.showerror("Invalid Frequency Range", str(e))
+                return
+
+        try:
+            df_all, df_avg, (fmin, fmax), rsd, warnings = self.logic.process_spectra(
+                self.raw_data_list,
+                freq_range=freq_range,
+            )
+        except ValueError as e:
+            messagebox.showerror("Preprocessing Error", str(e))
+            return
+
         self.df_all_diagnostics = df_all
         self.df_avg = df_avg
 
@@ -292,10 +356,7 @@ class OsifUI(ttk.Frame):
         self.processed_zr = df_avg["Z'(Ohm.cm²)"].values
         self.processed_zi = df_avg["Z''(Ohm.cm²)"].values
 
-        self.ent_fmax.delete(0, tk.END)
-        self.ent_fmax.insert(0, f"{fmax:.2f}")
-        self.ent_fmin.delete(0, tk.END)
-        self.ent_fmin.insert(0, f"{fmin:.2f}")
+        self._update_frequency_entries_after_preprocess(fmin, fmax, freq_range)
 
         est_hfr = float(np.min(self.processed_zr))
         self.entries["HFR"].delete(0, tk.END)
@@ -354,10 +415,24 @@ class OsifUI(ttk.Frame):
         self.canvas_diag.draw_idle()
         self.notebook.select(self.tab_diag)
 
-        if len(self.raw_data_list) >= 3:
-            self.lbl_status.config(text=f"{len(self.raw_data_list)} files averaged. RSD: {rsd:.2%}")
+        processed_count = df_all["scan"].nunique()
+        if processed_count >= 3:
+            status_prefix = f"{processed_count} files averaged."
+            status_suffix = f" RSD: {rsd:.2%}"
         else:
-            self.lbl_status.config(text=f"{len(self.raw_data_list)} file(s) processed.")
+            status_prefix = f"{processed_count} of {len(self.raw_data_list)} file(s) processed."
+            status_suffix = ""
+        if freq_range is not None:
+            status_suffix += " KK range-limited."
+        if warnings:
+            status_suffix += f" {len(warnings)} warning(s)."
+        self.lbl_status.config(text=f"{status_prefix}{status_suffix}")
+
+        if warnings:
+            warning_text = "\n".join(warnings[:8])
+            if len(warnings) > 8:
+                warning_text += f"\n...and {len(warnings) - 8} more warning(s)."
+            messagebox.showwarning("KK Preprocessing Warnings", warning_text)
 
     # ------------------------------------------------------------------
     # Fitting

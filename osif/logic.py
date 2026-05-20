@@ -28,13 +28,39 @@ class EisLogic:
         # Matched to EIS ave.py settings
         self.kk_threshold = 0.1
         self.outlier_z_threshold = 1.5
+        self.min_kk_points = 3
 
     # --- Preprocessing & KK ---
-    def process_spectra(self, data_list):
+    def process_spectra(self, data_list, freq_range=None):
+        f_min, f_max = self._normalize_frequency_range(freq_range)
+        use_range = f_min is not None or f_max is not None
+
         all_scans = []
+        warnings = []
         for i, data in enumerate(data_list):
-            freq = data['frequency']
-            z_complex = data['z_complex']
+            freq = np.asarray(data['frequency'])
+            z_real = np.asarray(data['z_real'])
+            z_imag = np.asarray(data['z_imag'])
+            z_complex = np.asarray(data['z_complex'])
+
+            if use_range:
+                in_scope = np.ones(len(freq), dtype=bool)
+                if f_min is not None:
+                    in_scope &= freq >= f_min
+                if f_max is not None:
+                    in_scope &= freq <= f_max
+
+                freq = freq[in_scope]
+                z_real = z_real[in_scope]
+                z_imag = z_imag[in_scope]
+                z_complex = z_complex[in_scope]
+
+            if len(freq) < self.min_kk_points:
+                warnings.append(
+                    f"Scan {i + 1}: skipped; {len(freq)} in-scope point(s), "
+                    f"need at least {self.min_kk_points} for KK validation."
+                )
+                continue
 
             try:
                 # Mute the automatic print statements from linKK
@@ -44,12 +70,26 @@ class EisLogic:
                 point_errors = np.sqrt(res_real ** 2 + res_imag ** 2)
 
                 df_scan = pd.DataFrame({
-                    'f': freq, 'zr': data['z_real'], 'zi': data['z_imag'],
-                    'scan': i + 1, 'kk_err': point_errors
+                    'f': freq, 'zr': z_real, 'zi': z_imag,
+                    'scan': i + 1, 'kk_err': point_errors,
+                    'in_scope': True,
+                    'range_f_min': f_min if f_min is not None else np.nan,
+                    'range_f_max': f_max if f_max is not None else np.nan,
                 })
                 all_scans.append(df_scan)
             except Exception as e:
+                msg = f"Scan {i + 1}: KK validation failed ({e})."
+                warnings.append(msg)
                 print(f"KK Error on scan {i + 1}: {e}")
+
+        if not all_scans:
+            detail = " ".join(warnings)
+            if use_range:
+                raise ValueError(
+                    "No spectra could be processed for KK validation inside the selected "
+                    f"frequency range. {detail}".strip()
+                )
+            raise ValueError(f"No spectra could be processed for KK validation. {detail}".strip())
 
         df_all = pd.concat(all_scans, ignore_index=True)
 
@@ -95,7 +135,28 @@ class EisLogic:
             "Z''_std": zi_std
         })
 
-        return df_all, df_avg, (freq_min_suggested, freq_max_suggested), rsd
+        return df_all, df_avg, (freq_min_suggested, freq_max_suggested), rsd, warnings
+
+    def _normalize_frequency_range(self, freq_range):
+        if freq_range is None:
+            return None, None
+
+        f_min, f_max = freq_range
+
+        if f_min is not None:
+            f_min = float(f_min)
+            if not np.isfinite(f_min):
+                raise ValueError("f_min must be a finite number.")
+
+        if f_max is not None:
+            f_max = float(f_max)
+            if not np.isfinite(f_max):
+                raise ValueError("f_max must be a finite number.")
+
+        if f_min is not None and f_max is not None and f_min > f_max:
+            raise ValueError("f_min must be less than or equal to f_max.")
+
+        return f_min, f_max
 
     # --- Fitting Models ---
     def JPcoth(self, x):
