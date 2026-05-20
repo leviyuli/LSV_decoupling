@@ -30,6 +30,7 @@ class OsifUI(ttk.Frame):
         self.df_avg = None
         self.processed_f = self.processed_zr = self.processed_zi = None
         self.limit_kk_range_var = tk.BooleanVar(value=False)
+        self.fit_max_nfev_var = tk.StringVar(value=str(self.logic.fit_max_nfev))
 
         self.entries = {}
         self.se_labels = {}
@@ -182,6 +183,15 @@ class OsifUI(ttk.Frame):
         )
         self.cmb_model.pack(fill=tk.X)
 
+        eval_f = ttk.Frame(self.fit_container)
+        eval_f.pack(fill=tk.X, pady=(8, 0))
+        eval_f.columnconfigure(1, weight=1)
+        ttk.Label(eval_f, text="Max evaluations").grid(row=0, column=0, sticky="w", padx=2)
+        self.ent_fit_max_nfev = ttk.Entry(
+            eval_f, width=12, textvariable=self.fit_max_nfev_var,
+        )
+        self.ent_fit_max_nfev.grid(row=0, column=1, sticky="ew", padx=2)
+
         self.btn_fit = ttk.Button(
             self.fit_container, text="Fit model", command=self.run_fitting,
             style="Accent.TButton",
@@ -240,6 +250,7 @@ class OsifUI(ttk.Frame):
             child.configure(state=state)
 
         self.cmb_model.configure(state=state_cmb)
+        self.ent_fit_max_nfev.configure(state=state)
         self.btn_fit.configure(state=state)
 
     # ------------------------------------------------------------------
@@ -310,22 +321,15 @@ class OsifUI(ttk.Frame):
 
         return fmin, fmax
 
-    def _update_frequency_entries_after_preprocess(self, suggested_min, suggested_max, freq_range):
-        if freq_range is None:
-            update_min = True
-            update_max = True
-        else:
-            requested_min, requested_max = freq_range
-            update_min = requested_min is None
-            update_max = requested_max is None
+    def _update_frequency_entries_after_preprocess(self, suggested_min, suggested_max):
+        # Always narrow the fit window to the KK-valid sub-range, whether or not
+        # the user provided a manual scope. The manual entries are interpreted as
+        # the KK *scope*, not the fit window.
+        self.ent_fmax.delete(0, tk.END)
+        self.ent_fmax.insert(0, f"{suggested_max:.2f}")
 
-        if update_max:
-            self.ent_fmax.delete(0, tk.END)
-            self.ent_fmax.insert(0, f"{suggested_max:.2f}")
-
-        if update_min:
-            self.ent_fmin.delete(0, tk.END)
-            self.ent_fmin.insert(0, f"{suggested_min:.2f}")
+        self.ent_fmin.delete(0, tk.END)
+        self.ent_fmin.insert(0, f"{suggested_min:.2f}")
 
     def run_preprocessing(self):
         if not self.raw_data_list:
@@ -356,7 +360,7 @@ class OsifUI(ttk.Frame):
         self.processed_zr = df_avg["Z'(Ohm.cm²)"].values
         self.processed_zi = df_avg["Z''(Ohm.cm²)"].values
 
-        self._update_frequency_entries_after_preprocess(fmin, fmax, freq_range)
+        self._update_frequency_entries_after_preprocess(fmin, fmax)
 
         est_hfr = float(np.min(self.processed_zr))
         self.entries["HFR"].delete(0, tk.END)
@@ -423,7 +427,14 @@ class OsifUI(ttk.Frame):
             status_prefix = f"{processed_count} of {len(self.raw_data_list)} file(s) processed."
             status_suffix = ""
         if freq_range is not None:
-            status_suffix += " KK range-limited."
+            req_min, req_max = freq_range
+            if req_min is not None and req_max is not None:
+                scope_text = f"{req_min:.2f}–{req_max:.2f} Hz"
+            elif req_min is not None:
+                scope_text = f"≥{req_min:.2f} Hz"
+            else:
+                scope_text = f"≤{req_max:.2f} Hz"
+            status_suffix += f" KK scope: {scope_text}."
         if warnings:
             status_suffix += f" {len(warnings)} warning(s)."
         self.lbl_status.config(text=f"{status_prefix}{status_suffix}")
@@ -437,12 +448,30 @@ class OsifUI(ttk.Frame):
     # ------------------------------------------------------------------
     # Fitting
     # ------------------------------------------------------------------
+    def _parse_fit_max_nfev(self):
+        text = self.fit_max_nfev_var.get().strip()
+        if not text:
+            return self.logic.fit_max_nfev
+        try:
+            value = int(text)
+        except ValueError:
+            raise ValueError("Max evaluations must be a positive integer.") from None
+        if value <= 0:
+            raise ValueError("Max evaluations must be a positive integer.")
+        return value
+
     def run_fitting(self):
         if self.processed_f is None:
             messagebox.showerror("Error", "Run preprocessing first.")
             return
 
-        fmax, fmin = float(self.ent_fmax.get()), float(self.ent_fmin.get())
+        try:
+            fmax, fmin = float(self.ent_fmax.get()), float(self.ent_fmin.get())
+            max_nfev = self._parse_fit_max_nfev()
+        except ValueError as e:
+            messagebox.showerror("Invalid Fit Input", str(e))
+            return
+
         mask = (self.processed_f >= fmin) & (self.processed_f <= fmax)
         f_fit = self.processed_f[mask]
         z_exp = self.processed_zr[mask] + 1j * self.processed_zi[mask]
@@ -450,7 +479,9 @@ class OsifUI(ttk.Frame):
         free_keys = ["HFR", "Rcl", "Qdl", "Phi"]
         init_p = [float(self.entries[k].get()) for k in free_keys]
 
-        results, error_msg = self.logic.fit_impedance(self.model_var.get(), init_p, f_fit, z_exp)
+        results, error_msg = self.logic.fit_impedance(
+            self.model_var.get(), init_p, f_fit, z_exp, max_nfev=max_nfev,
+        )
 
         if error_msg:
             messagebox.showerror("Fitting Error", error_msg)

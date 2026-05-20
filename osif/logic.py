@@ -29,6 +29,7 @@ class EisLogic:
         self.kk_threshold = 0.1
         self.outlier_z_threshold = 1.5
         self.min_kk_points = 3
+        self.fit_max_nfev = 20000
 
     # --- Preprocessing & KK ---
     def process_spectra(self, data_list, freq_range=None):
@@ -177,7 +178,13 @@ class EisLogic:
             Z = HFR + Rcl / (term * self.JPcoth(term) - 1)
         return Z
 
-    def fit_impedance(self, model_name, init_params, freq, z_exp):
+    def fit_impedance(self, model_name, init_params, freq, z_exp, max_nfev=None):
+        if max_nfev is None:
+            max_nfev = self.fit_max_nfev
+        max_nfev = int(max_nfev)
+        if max_nfev <= 0:
+            raise ValueError("Maximum function evaluations must be a positive integer.")
+
         def cost_func(params):
             Z_model = self.evaluate_model(model_name, params, freq)
             diff = (np.real(Z_model) - np.real(z_exp)) ** 2 + (np.imag(Z_model) - np.imag(z_exp)) ** 2
@@ -190,11 +197,15 @@ class EisLogic:
         try:
             res = scipy.optimize.least_squares(
                 cost_func, init_params, bounds=(lower_bounds, upper_bounds),
-                method='trf', xtol=1e-11, ftol=1e-11, gtol=1e-11
+                method='trf', xtol=1e-11, ftol=1e-11, gtol=1e-11,
+                max_nfev=max_nfev
             )
 
             if not res.success:
-                return None, f"Fitting algorithm failed: {res.message}"
+                return None, (
+                    f"Fitting algorithm failed after {res.nfev} function evaluation(s): "
+                    f"{res.message}"
+                )
 
             try:
                 cov_matrix = np.linalg.inv(res.jac.T @ res.jac)
