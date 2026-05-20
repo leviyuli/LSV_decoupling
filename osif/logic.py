@@ -173,6 +173,9 @@ class EisLogic:
     def JPcoth(self, x):
         return (np.exp(x) + np.exp(-x)) / (np.exp(x) - np.exp(-x))
 
+    def JPtanh(self, x):
+        return (np.exp(x) - np.exp(-x)) / (np.exp(x) + np.exp(-x))
+
     def evaluate_model(self, model_name, params, freq):
         # Canonical 6-vector: [L_wire, HFR, R_CL, Q_dl, Phi, Theta].
         # L_wire == 0 ⇒ inductive term collapses to 0 regardless of Theta.
@@ -181,15 +184,22 @@ class EisLogic:
 
         Z_L = Lwire * (omega ** Theta) if Lwire != 0 else 0
 
+        # x = √(R_cl · Q_dl · (jω)^φ); prefactor = √(R_cl / (Q_dl·(jω)^φ)) = R_cl / x.
+        x = np.sqrt(Rcl * Qdl * (omega ** Phi))
+        prefactor = np.sqrt(Rcl / (Qdl * (omega ** Phi)))
+
         if model_name == "Transmission Line":
-            term = np.sqrt(Rcl / (Qdl * (omega ** Phi)))
-            Z = Z_L + HFR + term * self.JPcoth(np.sqrt(Rcl * Qdl * (omega ** Phi)))
+            # Porous-electrode TLM / finite-space (restricted) diffusion: reflecting boundary.
+            Z = Z_L + HFR + prefactor * self.JPcoth(x)
         elif model_name == "1-D Linear Diffusion":
-            term = Rcl * (Rcl * (Qdl * (omega ** Phi))) ** (-0.5)
-            Z = Z_L + HFR + term * self.JPcoth(np.sqrt(Rcl * Qdl * (omega ** Phi)))
+            # Finite-length (Warburg-short) diffusion: transmissive boundary.
+            # Fix vs. upstream OSIF 2.0, which used JPcoth here and so collapsed
+            # to the Transmission Line form — see Diard/Le Gorrec/Montella,
+            # Handbook of EIS: Diffusion Impedances.
+            Z = Z_L + HFR + prefactor * self.JPtanh(x)
         elif model_name == "1-D Spherical Diffusion":
-            term = np.sqrt(Rcl * Qdl * (omega ** Phi))
-            Z = Z_L + HFR + Rcl / (term * self.JPcoth(term) - 1)
+            # Restricted spherical diffusion (reflecting boundary).
+            Z = Z_L + HFR + Rcl / (x * self.JPcoth(x) - 1)
         return Z
 
     def _perturb_init_params(self, init_params, lower_bounds, upper_bounds, rng,

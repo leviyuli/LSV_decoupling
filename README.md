@@ -50,12 +50,14 @@ This module is a heavily customized version of the [NREL Open Source Impedance F
 * **Multi-start with parameter-accuracy ranking:** Every restart's covariance is computed; the winner minimises $\max(\mathrm{SE}_{HFR}/|HFR|,\ \mathrm{SE}_{R_{cl}}/|R_{cl}|)$ among restarts within the SSR-sanity gate. This biases the choice toward fits that *determine* $HFR$ and $R_{cl}$ rather than fits that merely chase the residual.
 * **Robust Error Estimation:** To prevent the algorithm from crashing on singular Hessian matrices during least-squares optimization, the code falls back to a pseudo-inverse (`np.linalg.pinv`), allowing fitting to proceed even with highly correlated parameters.
 * **Wire-inductance model:** When enabled, the impedance gains a $L_{wire}\cdot(j\omega)^{\theta}$ prefactor with $L_{wire}\in[0,1]\,\mathrm{H\cdot cm^2}$ and $\theta\in[0,1]$, matching upstream OSIF 2.0. The $HFR$ bound is widened from $\pm10\%$ to $\pm20\%$ in this mode because $L_{wire}$ partially absorbs $HFR$ at high frequency. Inductive parameters are known to be ill-conditioned without sufficient high-frequency resolution — leave the toggle **off** unless your data extends well into the inductive ridge.
-* **Models Included:**
-  1. **Transmission Line (Default):** For porous electrodes (e.g., PEMFC catalyst layers). With inductance off:
-     $$Z(\omega)=HFR+\sqrt{\frac{R_{cl}}{Q_{dl}(j\omega)^{\phi}}}\coth\left(\sqrt{R_{cl}Q_{dl}(j\omega)^{\phi}}\right)$$
-     With inductance on, add $L_{wire}(j\omega)^{\theta}$ to the right-hand side.
-  2. **1-D Linear Diffusion:** For planar electrode linear diffusion.
-  3. **1-D Spherical Diffusion:** For nanoparticle/spherical diffusion limits.
+* **Models Included** (all three accept the optional $L_{wire}(j\omega)^{\theta}$ prefactor when the inductance toggle is on):
+  1. **Transmission Line (Default):** For porous electrodes (e.g., PEMFC catalyst layers).
+     $$Z(\omega)=HFR+\sqrt{\frac{R_{cl}}{Q_{dl}(j\omega)^{\phi}}}\;\coth\left(\sqrt{R_{cl}\,Q_{dl}(j\omega)^{\phi}}\right)$$
+  2. **1-D Linear Diffusion (Finite-Length Warburg, transmissive boundary):** For planar / film electrodes whose far boundary acts as a sink for the diffusing species.
+     $$Z(\omega)=HFR+\sqrt{\frac{R_{cl}}{Q_{dl}(j\omega)^{\phi}}}\;\tanh\left(\sqrt{R_{cl}\,Q_{dl}(j\omega)^{\phi}}\right)$$
+     > Note: upstream OSIF 2.0 wrote this branch with $\coth$ instead of $\tanh$, which makes it algebraically identical to the Transmission Line form. The expression above uses $\tanh$ — the "finite-length Warburg short" / Diard–Le Gorrec–Montella convention — so that the Linear and Transmission-Line models give physically distinct curves.
+  3. **1-D Spherical Diffusion (restricted, reflecting boundary):** For nanoparticles or restricted spherical diffusion.
+     $$Z(\omega)=HFR+\frac{R_{cl}}{\sqrt{R_{cl}\,Q_{dl}(j\omega)^{\phi}}\;\coth\left(\sqrt{R_{cl}\,Q_{dl}(j\omega)^{\phi}}\right)-1}$$
 
 ---
 
