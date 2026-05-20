@@ -26,27 +26,34 @@ A unified, Python-based desktop application for advanced electrochemical data an
 
 ## 🛠️ Module 1: EIS Fitting (OSIF-Revised)
 
-This module is a heavily customized version of the [NREL Open Source Impedance Fitter (OSIF)](https://github.com/NREL/OSIF), tailored for water electrolysis Membrane Electrode Assemblies (MEAs). It simplifies the original model to prevent overfitting and adds robust pre-processing pipelines.
+This module is a heavily customized version of the [NREL Open Source Impedance Fitter (OSIF)](https://github.com/NREL/OSIF), tailored for water electrolysis Membrane Electrode Assemblies (MEAs). It adds robust pre-processing, a multi-start fit ranked by parameter accuracy, and an opt-in wire-inductance term.
 
 ### What it does:
 * **Automated Data Parsing:** Intelligently scans `.txt`, `.csv`, or `.xlsx` files to locate headers and extract Frequency, Z', and Z'' columns. No manual file formatting is required.
 * **Validation & Averaging:** Runs a point-by-point Linear Kramers-Kronig (Lin-KK) test to identify unphysical data points. If $\geq 3$ spectra are loaded, it automatically filters outliers ($Z > 1.5$) and calculates a final averaged curve with Relative Standard Deviation (RSD).
-* **Impedance Fitting:** Fits the non-Faradaic region to distributed element models to accurately extract $HFR$, $R_{cl}$, $Q_{dl}$, and $\phi$. 
+* **Multi-start Impedance Fitting:** Runs N optimizer launches (default 8) from perturbed initial guesses and keeps the result with the **lowest combined relative standard error on $HFR$ and $R_{cl}$** — not just the lowest residual. Restarts whose SSR is more than $2\times$ the best are rejected from the ranking as clearly worse local minima.
+* **Optional Wire-Inductance Term:** A checkbox enables fitting $L_{wire}$ and $\theta$ alongside $HFR$, $R_{cl}$, $Q_{dl}$, $\phi$ (matching the original OSIF 2.0 parameterisation). When off (default), the model collapses to $Z = HFR + Z_\mathrm{diffusive}$ for bit-identical legacy behaviour.
 
 ### How to use:
 1. **Load Files:** Click "Add" to select one or multiple EIS data files. Use the listbox to manage your loaded files.
-2. **Preprocess:** Click **"Run Preprocess & KK Test"**. The app will plot a Nyquist validation chart (Valid vs. Invalid points) and a Bode Error plot. It will also auto-fill an estimated $HFR$ based on the high-frequency intercept.
-3. **Fit Model:** * Ensure "Enable Impedance Fitting" is checked.
-   * Adjust the Frequency Window to isolate the non-Faradaic region.
-   * Click **"Fit Model"**. The fitted parameters, along with their Standard Errors (SE%), will appear in the left panel, and the fitted curves will overlay your data.
-4. **Export:** Click **"Export Results"** to generate an Excel workbook containing the raw/diagnostic data, the averaged dataset, the fitted curve coordinates, and the final parameter values.
+2. **Preprocess:** Click **"Run preprocess & KK test"**. The app plots a Nyquist validation chart (Valid vs. Invalid points) and a Bode Error plot, and auto-fills an estimated $HFR$ from the high-frequency intercept. The fit window is narrowed to the KK-valid sub-range.
+3. **Fit Model:**
+   * Ensure "Enable impedance fitting" is checked.
+   * (Optional) Tick **"Fit wire inductance (L_wire, Θ)"** to free the two inductive parameters; defaults seed to $L_{wire}=2\times10^{-5}\,\mathrm{H\cdot cm^2}$, $\theta=0.95$.
+   * Adjust the frequency window if needed; tune **Max evaluations** and **Restarts** under the model selector.
+   * Click **"Fit model"**. The status line under the controls reports the chosen restart, the max relative SE on $HFR$ / $R_{cl}$, and the SSR. Parameters whose SE exceeds 50% are highlighted in red as "high uncertainty".
+4. **Export:** Click **"Export results…"** to generate an Excel workbook containing the raw/diagnostic data, the averaged dataset, the fitted curve coordinates, and the final parameter table.
+
+> The control column is scrollable — use the mouse wheel inside the left panel if the window is too short to show everything at once.
 
 ### The Underlying Logic & Math
-* **Robust Error Estimation:** To prevent the algorithm from crashing on singular Hessian matrices during least-squares optimization, the code utilizes a pseudo-inverse fallback (`np.linalg.pinv`), allowing fitting to proceed even with highly correlated parameters.
-* **Removal of Inductive Elements:** The original Transmission Line model included $L_{wire}$ and $\theta$. Because experimental data often lacks sufficient high-frequency resolution to constrain these variables, they cause parameter redundancy and singular matrices. **In this software, $L_{wire}$ and $\theta$ are strictly fixed to 0.**
+* **Multi-start with parameter-accuracy ranking:** Every restart's covariance is computed; the winner minimises $\max(\mathrm{SE}_{HFR}/|HFR|,\ \mathrm{SE}_{R_{cl}}/|R_{cl}|)$ among restarts within the SSR-sanity gate. This biases the choice toward fits that *determine* $HFR$ and $R_{cl}$ rather than fits that merely chase the residual.
+* **Robust Error Estimation:** To prevent the algorithm from crashing on singular Hessian matrices during least-squares optimization, the code falls back to a pseudo-inverse (`np.linalg.pinv`), allowing fitting to proceed even with highly correlated parameters.
+* **Wire-inductance model:** When enabled, the impedance gains a $L_{wire}\cdot(j\omega)^{\theta}$ prefactor with $L_{wire}\in[0,1]\,\mathrm{H\cdot cm^2}$ and $\theta\in[0,1]$, matching upstream OSIF 2.0. The $HFR$ bound is widened from $\pm10\%$ to $\pm20\%$ in this mode because $L_{wire}$ partially absorbs $HFR$ at high frequency. Inductive parameters are known to be ill-conditioned without sufficient high-frequency resolution — leave the toggle **off** unless your data extends well into the inductive ridge.
 * **Models Included:**
-  1. **Transmission Line (Default):** For porous electrodes (e.g., PEMFC catalyst layers).
+  1. **Transmission Line (Default):** For porous electrodes (e.g., PEMFC catalyst layers). With inductance off:
      $$Z(\omega)=HFR+\sqrt{\frac{R_{cl}}{Q_{dl}(j\omega)^{\phi}}}\coth\left(\sqrt{R_{cl}Q_{dl}(j\omega)^{\phi}}\right)$$
+     With inductance on, add $L_{wire}(j\omega)^{\theta}$ to the right-hand side.
   2. **1-D Linear Diffusion:** For planar electrode linear diffusion.
   3. **1-D Spherical Diffusion:** For nanoparticle/spherical diffusion limits.
 
