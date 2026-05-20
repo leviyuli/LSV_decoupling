@@ -12,6 +12,11 @@ from core.style import BG, INK, SUBTLE, ACCENT, BORDER, style_axes
 from osif.logic import EisLogic
 
 
+# Colour used to flag fit parameters whose relative standard error exceeds
+# the high-uncertainty threshold from EisLogic.fit_high_uncertainty_pct.
+COLOR_HIGH_SE = "#B91C1C"
+
+
 # Palette for EIS plots (data vs fit) — shares the language of the LSV module.
 COLOR_DATA = "#1D4ED8"     # indigo for measured points
 COLOR_FIT = "#B91C1C"      # crimson for the model curve
@@ -31,6 +36,7 @@ class OsifUI(ttk.Frame):
         self.processed_f = self.processed_zr = self.processed_zi = None
         self.limit_kk_range_var = tk.BooleanVar(value=False)
         self.fit_max_nfev_var = tk.StringVar(value=str(self.logic.fit_max_nfev))
+        self.fit_n_restarts_var = tk.StringVar(value=str(self.logic.fit_n_restarts))
 
         self.entries = {}
         self.se_labels = {}
@@ -50,9 +56,43 @@ class OsifUI(ttk.Frame):
     def _build_layout(self):
         self.configure(style="TFrame")
 
-        # --- Left Panel: Controls ---
-        left_panel = ttk.Frame(self)
-        left_panel.pack(side=tk.LEFT, fill=tk.Y, padx=(14, 8), pady=14)
+        # --- Left Panel: Controls (scrollable so a short window can't clip
+        # the Fit button or the Export button at the bottom). ---
+        left_container = ttk.Frame(self)
+        left_container.pack(side=tk.LEFT, fill=tk.Y, padx=(14, 8), pady=14)
+
+        left_canvas = tk.Canvas(
+            left_container, background=BG, borderwidth=0, highlightthickness=0,
+        )
+        left_scroll = ttk.Scrollbar(
+            left_container, orient=tk.VERTICAL, command=left_canvas.yview,
+        )
+        left_canvas.configure(yscrollcommand=left_scroll.set)
+        left_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        left_canvas.pack(side=tk.LEFT, fill=tk.Y, expand=False)
+
+        left_panel = ttk.Frame(left_canvas, style="TFrame")
+        left_canvas.create_window((0, 0), window=left_panel, anchor="nw")
+
+        def _on_inner_configure(_event):
+            left_canvas.configure(scrollregion=left_canvas.bbox("all"))
+            # Match the canvas width to the inner content so widgets don't squeeze.
+            req_w = left_panel.winfo_reqwidth()
+            if left_canvas.winfo_width() != req_w:
+                left_canvas.configure(width=req_w)
+
+        left_panel.bind("<Configure>", _on_inner_configure)
+
+        # Mouse-wheel scrolling, scoped to the canvas (Windows delta = ±120/notch).
+        def _on_mousewheel(event):
+            left_canvas.yview_scroll(int(-event.delta / 120), "units")
+
+        left_canvas.bind(
+            "<Enter>", lambda _e: left_canvas.bind_all("<MouseWheel>", _on_mousewheel),
+        )
+        left_canvas.bind(
+            "<Leave>", lambda _e: left_canvas.unbind_all("<MouseWheel>"),
+        )
 
         ttk.Label(
             left_panel, text="EIS Fitting (OSIF)",
@@ -138,6 +178,15 @@ class OsifUI(ttk.Frame):
             variable=self.do_fit_var, command=self.toggle_fit_ui,
         ).pack(anchor="w", pady=(0, 6))
 
+        self.fit_inductance_var = tk.BooleanVar(value=False)
+        self.chk_fit_inductance = ttk.Checkbutton(
+            self.fit_container,
+            text="Fit wire inductance (L_wire, Θ)",
+            variable=self.fit_inductance_var,
+            command=self.toggle_inductance_ui,
+        )
+        self.chk_fit_inductance.pack(anchor="w", pady=(0, 6))
+
         self.param_frame = ttk.Frame(self.fit_container)
         self.param_frame.pack(fill=tk.X)
         self.param_frame.columnconfigure(1, weight=1)
@@ -192,6 +241,20 @@ class OsifUI(ttk.Frame):
         )
         self.ent_fit_max_nfev.grid(row=0, column=1, sticky="ew", padx=2)
 
+        ttk.Label(eval_f, text="Restarts").grid(row=1, column=0, sticky="w", padx=2, pady=(4, 0))
+        self.ent_fit_n_restarts = ttk.Entry(
+            eval_f, width=12, textvariable=self.fit_n_restarts_var,
+        )
+        self.ent_fit_n_restarts.grid(row=1, column=1, sticky="ew", padx=2, pady=(4, 0))
+        ttk.Label(
+            self.fit_container,
+            text="Multi-start: ranks N tries by HFR / R_CL accuracy.",
+            style="Hint.TLabel",
+        ).pack(anchor="w", pady=(2, 0))
+
+        self.lbl_fit_status = ttk.Label(self.fit_container, text="", style="Status.TLabel")
+        self.lbl_fit_status.pack(anchor="w", pady=(4, 0))
+
         self.btn_fit = ttk.Button(
             self.fit_container, text="Fit model", command=self.run_fitting,
             style="Accent.TButton",
@@ -240,18 +303,48 @@ class OsifUI(ttk.Frame):
         self.toolbar_fit.update()
 
     def toggle_fit_ui(self):
-        state = "normal" if self.do_fit_var.get() else "disabled"
-        state_cmb = "readonly" if self.do_fit_var.get() else "disabled"
+        fit_on = self.do_fit_var.get()
+        state = "normal" if fit_on else "disabled"
+        state_cmb = "readonly" if fit_on else "disabled"
 
         for child in self.param_frame.winfo_children():
             if isinstance(child, ttk.Entry):
                 if child in [self.entries["Lwire"], self.entries["Theta"]]:
+                    # Inductance entries are gated by toggle_inductance_ui below.
                     continue
             child.configure(state=state)
 
         self.cmb_model.configure(state=state_cmb)
         self.ent_fit_max_nfev.configure(state=state)
+        self.ent_fit_n_restarts.configure(state=state)
+        self.chk_fit_inductance.configure(state=state)
         self.btn_fit.configure(state=state)
+        # Re-apply the inductance lock-state consistent with the parent toggle.
+        self.toggle_inductance_ui()
+
+    def toggle_inductance_ui(self):
+        # The inductance entries follow both the fit-enable and the inductance
+        # toggles: visible+editable only when both are on, otherwise locked.
+        parent_on = self.do_fit_var.get()
+        inductance_on = parent_on and self.fit_inductance_var.get()
+
+        if inductance_on:
+            for key, default in (("Lwire", "2e-5"), ("Theta", "0.95")):
+                ent = self.entries[key]
+                ent.configure(state="normal")
+                current = ent.get().strip()
+                if current in ("", "0", "0.0"):
+                    ent.delete(0, tk.END)
+                    ent.insert(0, default)
+                self.se_labels[key].config(text="± —", foreground=SUBTLE)
+        else:
+            for key in ("Lwire", "Theta"):
+                ent = self.entries[key]
+                ent.configure(state="normal")
+                ent.delete(0, tk.END)
+                ent.insert(0, "0")
+                ent.configure(state="readonly")
+                self.se_labels[key].config(text="fixed at 0", foreground=SUBTLE)
 
     # ------------------------------------------------------------------
     # File management
@@ -460,6 +553,18 @@ class OsifUI(ttk.Frame):
             raise ValueError("Max evaluations must be a positive integer.")
         return value
 
+    def _parse_fit_n_restarts(self):
+        text = self.fit_n_restarts_var.get().strip()
+        if not text:
+            return self.logic.fit_n_restarts
+        try:
+            value = int(text)
+        except ValueError:
+            raise ValueError("Restarts must be a positive integer.") from None
+        if value <= 0:
+            raise ValueError("Restarts must be a positive integer.")
+        return value
+
     def run_fitting(self):
         if self.processed_f is None:
             messagebox.showerror("Error", "Run preprocessing first.")
@@ -468,6 +573,7 @@ class OsifUI(ttk.Frame):
         try:
             fmax, fmin = float(self.ent_fmax.get()), float(self.ent_fmin.get())
             max_nfev = self._parse_fit_max_nfev()
+            n_restarts = self._parse_fit_n_restarts()
         except ValueError as e:
             messagebox.showerror("Invalid Fit Input", str(e))
             return
@@ -476,34 +582,75 @@ class OsifUI(ttk.Frame):
         f_fit = self.processed_f[mask]
         z_exp = self.processed_zr[mask] + 1j * self.processed_zi[mask]
 
-        free_keys = ["HFR", "Rcl", "Qdl", "Phi"]
-        init_p = [float(self.entries[k].get()) for k in free_keys]
+        fit_inductance = self.fit_inductance_var.get()
+
+        # Init vector matches the optimizer's working layout (4 or 6 long).
+        if fit_inductance:
+            init_keys = ["Lwire", "HFR", "Rcl", "Qdl", "Phi", "Theta"]
+        else:
+            init_keys = ["HFR", "Rcl", "Qdl", "Phi"]
+        init_p = [float(self.entries[k].get()) for k in init_keys]
 
         results, error_msg = self.logic.fit_impedance(
-            self.model_var.get(), init_p, f_fit, z_exp, max_nfev=max_nfev,
+            self.model_var.get(), init_p, f_fit, z_exp,
+            max_nfev=max_nfev, n_restarts=n_restarts,
+            fit_inductance=fit_inductance,
         )
 
         if error_msg:
             messagebox.showerror("Fitting Error", error_msg)
             return
 
-        params, se, residuals = results
+        # Logic always returns canonical 6-vectors: [L_wire, HFR, R_CL, Q_dl, Phi, Theta].
+        params, se, residuals, info = results
+        canonical_keys = ["Lwire", "HFR", "Rcl", "Qdl", "Phi", "Theta"]
+        # Only the params that were actually fit get value/SE labels updated.
+        editable_keys = init_keys
 
-        for i, k in enumerate(free_keys):
+        high_se_threshold = self.logic.fit_high_uncertainty_pct
+        flagged = []
+        for i, k in enumerate(canonical_keys):
+            if k not in editable_keys:
+                # Stays at its fixed-at-zero presentation; skip.
+                continue
             self.entries[k].delete(0, tk.END)
-            self.entries[k].insert(0, f"{params[i]:.6f}")
-            pct_error = (se[i] / params[i] * 100) if params[i] != 0 else 0
-            self.se_labels[k].config(text=f"± {se[i]:.3g} ({pct_error:.1f}%)")
+            value_fmt = f"{params[i]:.3e}" if k == "Lwire" else f"{params[i]:.6f}"
+            self.entries[k].insert(0, value_fmt)
+            pct_error = (abs(se[i]) / abs(params[i]) * 100) if params[i] != 0 else float("inf")
+            label_text = f"± {se[i]:.3g} ({pct_error:.1f}%)"
+            if not np.isfinite(pct_error) or pct_error > high_se_threshold:
+                self.se_labels[k].config(
+                    text=label_text + "  high",
+                    foreground=COLOR_HIGH_SE,
+                )
+                flagged.append(f"{k} ±{pct_error:.0f}%" if np.isfinite(pct_error) else f"{k} ±inf")
+            else:
+                self.se_labels[k].config(text=label_text, foreground=SUBTLE)
 
-        Z_model = self.logic.evaluate_model(self.model_var.get(), params, f_fit)
+        basis_label = "HFR/R_CL accuracy" if info["ranking_basis"] == "hfr_rcl_se" else "lowest SSR (fallback)"
+        fit_msg = (
+            f"Best of {info['n_restarts']} restarts (#{info['best_attempt']}, by {basis_label})  ·  "
+            f"max rel. SE on HFR/R_CL = {info['score_hfr_rcl_pct']:.1f}%  ·  "
+            f"SSR = {info['ssr']:.3g}"
+        )
+        if info["n_failed"]:
+            fit_msg += f"  ·  {info['n_failed']} restart(s) failed"
+        if flagged:
+            fit_msg += f"  ·  high uncertainty: {', '.join(flagged)}"
+        self.lbl_fit_status.config(
+            text=fit_msg,
+            foreground=COLOR_HIGH_SE if flagged else ACCENT,
+        )
+
+        Z_model = self.logic.evaluate_model(self.model_var.get(), list(params), f_fit)
 
         self.last_fit_data = {
             "f_fit": f_fit,
             "z_exp": z_exp,
             "Z_model": Z_model,
-            "keys": ["Lwire", "HFR", "Rcl", "Qdl", "Phi", "Theta"],
-            "params": [0, params[0], params[1], params[2], params[3], 0],
-            "se": [0, se[0], se[1], se[2], se[3], 0],
+            "keys": canonical_keys,
+            "params": list(np.asarray(params, dtype=float)),
+            "se": list(np.asarray(se, dtype=float)),
         }
 
         # Cache for hover-tooltip
@@ -535,13 +682,18 @@ class OsifUI(ttk.Frame):
         ax_ny.set_ylabel(r"−Z″  (Ω·cm²)")
         ax_ny.set_title("Nyquist", loc="left")
 
-        # Inline parameter readout in the Nyquist axes corner
-        param_text = (
-            f"HFR  = {params[0]:.4f} Ω·cm²\n"
-            f"R_CL = {params[1]:.4f} Ω·cm²\n"
-            f"Q_dl = {params[2]:.3g} F\n"
-            f"φ    = {params[3]:.3f}"
-        )
+        # Inline parameter readout in the Nyquist axes corner.
+        # params is canonical 6-vector: [L_wire, HFR, R_CL, Q_dl, Phi, Theta].
+        param_lines = [
+            f"HFR  = {params[1]:.4f} Ω·cm²",
+            f"R_CL = {params[2]:.4f} Ω·cm²",
+            f"Q_dl = {params[3]:.3g} F",
+            f"φ    = {params[4]:.3f}",
+        ]
+        if fit_inductance:
+            param_lines.append(f"L_wire = {params[0]:.3e} H·cm²")
+            param_lines.append(f"Θ    = {params[5]:.3f}")
+        param_text = "\n".join(param_lines)
         ax_ny.text(
             0.97, 0.05, param_text, transform=ax_ny.transAxes,
             ha="right", va="bottom", fontsize=9, color=INK,
