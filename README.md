@@ -1,7 +1,7 @@
 # Electrochemical Impedance & Voltammetry Analyzer
 
 A unified, Python-based desktop application for advanced electrochemical data analysis. This software integrates two powerful modules into a single tabbed interface:
-1. **EIS Processing & Fitting (OSIF-Revised):** For rigorous Kramers-Kronig validation, automated data averaging, and non-Faradaic impedance fitting to extract Catalyst Layer Resistance ($R_{cl}$) and High-Frequency Resistance ($HFR$).
+1. **EIS Processing & Fitting (OSIF-Revised):** For rigorous Kramers-Kronig validation, automated data averaging, and non-Faradaic or Faradaic impedance fitting to extract Catalyst Layer Resistance ($R_{cl}$), kinetic resistance ($R_k$), and High-Frequency Resistance ($HFR$).
 2. **LSV Decoupling:** For dissecting Linear Sweep Voltammetry (LSV) curves into kinetic, ohmic, catalyst-layer, and residual overpotentials using robust, iterative Tafel analysis.
 
 ---
@@ -31,32 +31,45 @@ This module is a heavily customized version of the [NREL Open Source Impedance F
 ### What it does:
 * **Automated Data Parsing:** Intelligently scans `.txt`, `.csv`, or `.xlsx` files to locate headers and extract Frequency, Z', and Z'' columns. No manual file formatting is required.
 * **Validation & Averaging:** Runs a point-by-point Linear Kramers-Kronig (Lin-KK) test to identify unphysical data points. If $\geq 3$ spectra are loaded, it automatically filters outliers ($Z > 1.5$) and calculates a final averaged curve with Relative Standard Deviation (RSD).
-* **Multi-start Impedance Fitting:** Runs N optimizer launches (default 8) from perturbed initial guesses and keeps the result with the **lowest combined relative standard error on $HFR$ and $R_{cl}$** — not just the lowest residual. Restarts whose SSR is more than $2\times$ the best are rejected from the ranking as clearly worse local minima.
+* **Multi-start Impedance Fitting:** Runs N optimizer launches (default 8) from perturbed initial guesses and keeps the result with the **lowest combined relative standard error on $HFR$ and $R_{cl}$** — not just the lowest residual. Restarts whose SSR is more than $2\times$ the best are rejected from the ranking as clearly worse local minima. $R_k$ is intentionally excluded from the ranking even for Faradaic fits, since its SE often dominates without reflecting actual fit quality.
 * **Optional Wire-Inductance Term:** A checkbox enables fitting $L_{wire}$ and $\theta$ alongside $HFR$, $R_{cl}$, $Q_{dl}$, $\phi$ (matching the original OSIF 2.0 parameterisation). When off (default), the model collapses to $Z = HFR + Z_\mathrm{diffusive}$ for bit-identical legacy behaviour.
+* **Faradaic TML Option:** The model selector includes a Faradaic porous-electrode transmission-line branch with finite $R_k$, useful for spectra such as $H_2/O_2$ where charge transfer contributes to the measured impedance.
+* **Simulate Tab (Forward-Model Sweeps):** A third interface for tweaking fitted (or hand-set) parameters and seeing the resulting EIS curve without rerunning the optimiser. The frequency window and number of points are user-controlled, and raw experimental points within the chosen window are overlaid for direct comparison. Useful for sensitivity exploration and "what-if" intuition.
 
 ### How to use:
 1. **Load Files:** Click "Add" to select one or multiple EIS data files. Use the listbox to manage your loaded files.
 2. **Preprocess:** Click **"Run preprocess & KK test"**. The app plots a Nyquist validation chart (Valid vs. Invalid points) and a Bode Error plot, and auto-fills an estimated $HFR$ from the high-frequency intercept. The fit window is narrowed to the KK-valid sub-range.
 3. **Fit Model:**
    * Ensure "Enable impedance fitting" is checked.
+   * Choose a model. Use **Transmission Line** for non-Faradaic / blocking spectra such as $H_2/N_2$, or **Faradaic Transmission Line (CPE)** for finite-charge-transfer spectra such as $H_2/O_2$.
    * (Optional) Tick **"Fit wire inductance (L_wire, Θ)"** to free the two inductive parameters; defaults seed to $L_{wire}=2\times10^{-5}\,\mathrm{H\cdot cm^2}$, $\theta=0.95$.
    * Adjust the frequency window if needed; tune **Max evaluations** and **Restarts** under the model selector.
    * Click **"Fit model"**. The status line under the controls reports the chosen restart, the max relative SE on $HFR$ / $R_{cl}$, and the SSR. Parameters whose SE exceeds 50% are highlighted in red as "high uncertainty".
-4. **Export:** Click **"Export results…"** to generate an Excel workbook containing the raw/diagnostic data, the averaged dataset, the fitted curve coordinates, and the final parameter table.
+4. **Explore (Optional):** Switch to the **Simulate** tab to perturb the fitted parameters and see how the model curve responds. Fitted values auto-populate after a fit; tweak any of the seven entries, optionally adjust the **f_min / f_max / Points** frequency-range fields, and click **"Simulate"** to redraw. Click **"Sync from fit"** to reset the entries to the latest fit values. Raw measured data points falling inside the chosen frequency window are overlaid on the four panels for direct comparison.
+5. **Export:** Click **"Export results…"** to generate an Excel workbook containing the raw/diagnostic data, the averaged dataset, the fitted curve coordinates, and the final parameter table.
 
 > The control column is scrollable — use the mouse wheel inside the left panel if the window is too short to show everything at once.
 
 ### The Underlying Logic & Math
-* **Multi-start with parameter-accuracy ranking:** Every restart's covariance is computed; the winner minimises $\max(\mathrm{SE}_{HFR}/|HFR|,\ \mathrm{SE}_{R_{cl}}/|R_{cl}|)$ among restarts within the SSR-sanity gate. This biases the choice toward fits that *determine* $HFR$ and $R_{cl}$ rather than fits that merely chase the residual.
+* **Multi-start with parameter-accuracy ranking:** Every restart's covariance is computed; the winner minimises $\max(\mathrm{SE}_{HFR}/|HFR|,\ \mathrm{SE}_{R_{cl}}/|R_{cl}|)$ among restarts within the SSR-sanity gate. The score deliberately ignores $R_k$ even for Faradaic fits — its SE is often loosely constrained and would otherwise dominate the ranking without reflecting actual fit quality. This biases the choice toward fits that *determine* $HFR$ and $R_{cl}$ rather than fits that merely chase the residual.
 * **Robust Error Estimation:** To prevent the algorithm from crashing on singular Hessian matrices during least-squares optimization, the code falls back to a pseudo-inverse (`np.linalg.pinv`), allowing fitting to proceed even with highly correlated parameters.
 * **Wire-inductance model:** When enabled, the impedance gains a $L_{wire}\cdot(j\omega)^{\theta}$ prefactor with $L_{wire}\in[0,1]\,\mathrm{H\cdot cm^2}$ and $\theta\in[0,1]$, matching upstream OSIF 2.0. The $HFR$ bound is widened from $\pm10\%$ to $\pm20\%$ in this mode because $L_{wire}$ partially absorbs $HFR$ at high frequency. Inductive parameters are known to be ill-conditioned without sufficient high-frequency resolution — leave the toggle **off** unless your data extends well into the inductive ridge.
-* **Models Included** (all three accept the optional $L_{wire}(j\omega)^{\theta}$ prefactor when the inductance toggle is on):
-  1. **Transmission Line (Default):** For porous electrodes (e.g., PEMFC catalyst layers).
+* **Models Included** (all accept the optional $L_{wire}(j\omega)^{\theta}$ prefactor when the inductance toggle is on):
+  1. **Transmission Line (Default, non-Faradaic):** For porous electrodes under blocking / non-Faradaic conditions.
      $$Z(\omega)=HFR+\sqrt{\frac{R_{cl}}{Q_{dl}(j\omega)^{\phi}}}\;\coth\left(\sqrt{R_{cl}\,Q_{dl}(j\omega)^{\phi}}\right)$$
-  2. **1-D Linear Diffusion (Finite-Length Warburg, transmissive boundary):** For planar / film electrodes whose far boundary acts as a sink for the diffusing species.
+     In the non-Faradaic low-frequency limit, after subtracting $HFR$ and the capacitive term, the real-axis intercept is:
+     $$\mathrm{Re}(Z_{CL})\to \frac{R_{cl}}{3}$$
+     so the app reports $R_{cl}/3$ as a derived low-frequency intercept.
+  2. **Faradaic Transmission Line (CPE):** For porous electrodes with finite charge-transfer resistance.
+     $$Z_k=\frac{1}{1/R_k+Q_{dl}(j\omega)^\phi}$$
+     $$Z(\omega)=HFR+\sqrt{R_{cl}Z_k}\;\coth\left(\sqrt{\frac{R_{cl}}{Z_k}}\right)$$
+     When $\phi=1$, this reduces to the ideal-capacitance form:
+     $$Z_k=\frac{R_k}{1+j\omega R_k C}$$
+     and when $R_k\to\infty$, it reduces to the non-Faradaic transmission-line model above.
+  3. **1-D Linear Diffusion (Finite-Length Warburg, transmissive boundary):** For planar / film electrodes whose far boundary acts as a sink for the diffusing species.
      $$Z(\omega)=HFR+\sqrt{\frac{R_{cl}}{Q_{dl}(j\omega)^{\phi}}}\;\tanh\left(\sqrt{R_{cl}\,Q_{dl}(j\omega)^{\phi}}\right)$$
      > Note: upstream OSIF 2.0 wrote this branch with $\coth$ instead of $\tanh$, which makes it algebraically identical to the Transmission Line form. The expression above uses $\tanh$ — the "finite-length Warburg short" / Diard–Le Gorrec–Montella convention — so that the Linear and Transmission-Line models give physically distinct curves.
-  3. **1-D Spherical Diffusion (restricted, reflecting boundary):** For nanoparticles or restricted spherical diffusion.
+  4. **1-D Spherical Diffusion (restricted, reflecting boundary):** For nanoparticles or restricted spherical diffusion.
      $$Z(\omega)=HFR+\frac{R_{cl}}{\sqrt{R_{cl}\,Q_{dl}(j\omega)^{\phi}}\;\coth\left(\sqrt{R_{cl}\,Q_{dl}(j\omega)^{\phi}}\right)-1}$$
 
 ---
