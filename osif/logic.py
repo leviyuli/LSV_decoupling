@@ -24,6 +24,9 @@ impedance.validation.eval = patched_eval
 # --------------------------------
 
 class EisLogic:
+    FARADAIC_TML_MODEL = "Faradaic Transmission Line (CPE)"
+    CANONICAL_KEYS = ["Lwire", "HFR", "Rcl", "Qdl", "Phi", "Theta", "Rk"]
+
     def __init__(self):
         self.kk_threshold = 0.1
         self.outlier_z_threshold = 1.5
@@ -176,47 +179,78 @@ class EisLogic:
     def JPtanh(self, x):
         return (np.exp(x) - np.exp(-x)) / (np.exp(x) + np.exp(-x))
 
+    def is_faradaic_model(self, model_name):
+        return model_name == self.FARADAIC_TML_MODEL
+
     def evaluate_model(self, model_name, params, freq):
-        # Canonical 6-vector: [L_wire, HFR, R_CL, Q_dl, Phi, Theta].
+        # Canonical 7-vector: [L_wire, HFR, R_CL, Q_dl, Phi, Theta, R_k].
         # L_wire == 0 ⇒ inductive term collapses to 0 regardless of Theta.
-        Lwire, HFR, Rcl, Qdl, Phi, Theta = params
+        if len(params) == 6:
+            # Backwards-compatible read path for older callers/tests.
+            params = list(params) + [np.inf]
+        Lwire, HFR, Rcl, Qdl, Phi, Theta, Rk = params
         omega = 1j * 2 * np.pi * freq
 
         Z_L = Lwire * (omega ** Theta) if Lwire != 0 else 0
 
-        # x = √(R_cl · Q_dl · (jω)^φ); prefactor = √(R_cl / (Q_dl·(jω)^φ)) = R_cl / x.
-        x = np.sqrt(Rcl * Qdl * (omega ** Phi))
-        prefactor = np.sqrt(Rcl / (Qdl * (omega ** Phi)))
+        cpe_admittance = Qdl * (omega ** Phi)
 
         if model_name == "Transmission Line":
             # Porous-electrode TLM / finite-space (restricted) diffusion: reflecting boundary.
+            # x = √(R_cl · Q_dl · (jω)^φ); prefactor = √(R_cl / (Q_dl·(jω)^φ)) = R_cl / x.
+            x = np.sqrt(Rcl * cpe_admittance)
+            prefactor = np.sqrt(Rcl / cpe_admittance)
             Z = Z_L + HFR + prefactor * self.JPcoth(x)
+        elif self.is_faradaic_model(model_name):
+            # Faradaic porous-electrode TML with finite kinetic impedance:
+            # Z_k = 1 / (1/R_k + Q_dl·(jω)^φ).
+            kinetic_admittance = (1.0 / Rk) + cpe_admittance
+            Zk = 1.0 / kinetic_admittance
+            Z = Z_L + HFR + np.sqrt(Rcl * Zk) * self.JPcoth(np.sqrt(Rcl / Zk))
         elif model_name == "1-D Linear Diffusion":
             # Finite-length (Warburg-short) diffusion: transmissive boundary.
             # Fix vs. upstream OSIF 2.0, which used JPcoth here and so collapsed
             # to the Transmission Line form — see Diard/Le Gorrec/Montella,
             # Handbook of EIS: Diffusion Impedances.
+            x = np.sqrt(Rcl * cpe_admittance)
+            prefactor = np.sqrt(Rcl / cpe_admittance)
             Z = Z_L + HFR + prefactor * self.JPtanh(x)
         elif model_name == "1-D Spherical Diffusion":
             # Restricted spherical diffusion (reflecting boundary).
+            x = np.sqrt(Rcl * cpe_admittance)
             Z = Z_L + HFR + Rcl / (x * self.JPcoth(x) - 1)
+        else:
+            raise ValueError(f"Unknown impedance model: {model_name}")
         return Z
 
     def _perturb_init_params(self, init_params, lower_bounds, upper_bounds, rng,
-                             fit_inductance=False):
+                             fit_inductance=False, fit_faradaic=False):
         """Generate a randomized initial guess for a multi-start restart.
 
         HFR is jittered uniformly within its bounds. R_CL and Q_dl span orders
-        of magnitude in practice, so they are drawn log-uniformly. Phi is
-        drawn uniformly within physically reasonable bounds. When inductance
-        fitting is active, L_wire is log-jittered ±1 decade around its init
-        and Theta is drawn uniformly in [0.6, 1.0]. Any draw is clipped to
-        the optimizer bounds.
+        of magnitude in practice, so they are drawn log-uniformly. Faradaic
+        R_k is drawn the same way. Phi is drawn uniformly within physically
+        reasonable bounds. When inductance fitting is active, L_wire is
+        log-jittered ±1 decade around its init and Theta is drawn uniformly
+        in [0.6, 1.0]. Any draw is clipped to the optimizer bounds.
         """
         def log_jitter(value, decades=1.0):
             base = max(abs(value), 1e-9)
             factor = 10.0 ** rng.uniform(-decades, decades)
             return base * factor
+
+        if fit_inductance and fit_faradaic:
+            lwire_init, hfr_init, rcl_init, qdl_init, phi_init, theta_init, rk_init = init_params
+            lwire_lo, hfr_lo = lower_bounds[0], lower_bounds[1]
+            lwire_hi, hfr_hi = upper_bounds[0], upper_bounds[1]
+            lwire = float(np.clip(log_jitter(lwire_init, decades=1.0), 1e-9, lwire_hi))
+            hfr = float(rng.uniform(hfr_lo, hfr_hi))
+            rcl = float(np.clip(log_jitter(rcl_init, decades=1.0), 1e-6, 1e6))
+            qdl = float(np.clip(log_jitter(qdl_init, decades=1.0), 1e-9, 1e3))
+            phi = float(rng.uniform(0.5, 0.95))
+            theta = float(rng.uniform(0.6, 1.0))
+            rk = float(np.clip(log_jitter(rk_init, decades=1.0), 1e-12, 1e12))
+            return [lwire, hfr, rcl, qdl, phi, theta, rk]
 
         if fit_inductance:
             lwire_init, hfr_init, rcl_init, qdl_init, phi_init, theta_init = init_params
@@ -229,6 +263,16 @@ class EisLogic:
             phi = float(rng.uniform(0.5, 0.95))
             theta = float(rng.uniform(0.6, 1.0))
             return [lwire, hfr, rcl, qdl, phi, theta]
+
+        if fit_faradaic:
+            hfr_init, rcl_init, qdl_init, phi_init, rk_init = init_params
+            hfr_lo, hfr_hi = lower_bounds[0], upper_bounds[0]
+            hfr = float(rng.uniform(hfr_lo, hfr_hi))
+            rcl = float(np.clip(log_jitter(rcl_init, decades=1.0), 1e-6, 1e6))
+            qdl = float(np.clip(log_jitter(qdl_init, decades=1.0), 1e-9, 1e3))
+            phi = float(rng.uniform(0.5, 0.95))
+            rk = float(np.clip(log_jitter(rk_init, decades=1.0), 1e-12, 1e12))
+            return [hfr, rcl, qdl, phi, rk]
 
         hfr_init, rcl_init, qdl_init, phi_init = init_params
         hfr_lo, hfr_hi = lower_bounds[0], upper_bounds[0]
@@ -250,10 +294,25 @@ class EisLogic:
             n_restarts = self.fit_n_restarts
         n_restarts = max(1, int(n_restarts))
 
-        # The optimizer trial vector is 4-element when inductance is off, 6 when on.
-        # `evaluate_model` always wants a 6-vector — pad trial vectors accordingly.
-        # `params_to_canonical` returns the canonical 6-vector [L_wire, HFR, R_CL, Q_dl, Phi, Theta].
-        if fit_inductance:
+        fit_faradaic = self.is_faradaic_model(model_name)
+
+        # The optimizer trial vector is 4/5-element when inductance is off,
+        # 6/7 when on. `evaluate_model` always wants a canonical 7-vector:
+        # [L_wire, HFR, R_CL, Q_dl, Phi, Theta, R_k].
+        if fit_inductance and fit_faradaic:
+            if len(init_params) != 7:
+                raise ValueError(
+                    "init_params must have 7 elements when fitting Faradaic TML "
+                    "with inductance: [L_wire, HFR, R_CL, Q_dl, Phi, Theta, R_k]."
+                )
+            hfr_init = init_params[1]
+            lower_bounds = [0.0, 0.8 * hfr_init, 1e-12, 1e-12, 0.0, 0.0, 1e-12]
+            upper_bounds = [1.0, 1.2 * hfr_init, np.inf, np.inf, 1.0, 1.0, np.inf]
+
+            def params_to_canonical(p):
+                return p
+
+        elif fit_inductance:
             if len(init_params) != 6:
                 raise ValueError(
                     "init_params must have 6 elements when fit_inductance=True: "
@@ -261,11 +320,24 @@ class EisLogic:
                 )
             hfr_init = init_params[1]
             # Widen HFR window because L_wire absorbs a slice of HFR at high f.
-            lower_bounds = [0.0, 0.8 * hfr_init, 0.0, 0.0, 0.0, 0.0]
+            lower_bounds = [0.0, 0.8 * hfr_init, 1e-12, 1e-12, 0.0, 0.0]
             upper_bounds = [1.0, 1.2 * hfr_init, np.inf, np.inf, 1.0, 1.0]
 
             def params_to_canonical(p):
-                return p
+                return list(p) + [np.inf]
+
+        elif fit_faradaic:
+            if len(init_params) != 5:
+                raise ValueError(
+                    "init_params must have 5 elements when fitting Faradaic TML "
+                    "without inductance: [HFR, R_CL, Q_dl, Phi, R_k]."
+                )
+            hfr_init = init_params[0]
+            lower_bounds = [0.9 * hfr_init, 1e-12, 1e-12, 0.0, 1e-12]
+            upper_bounds = [1.1 * hfr_init, np.inf, np.inf, 1.0, np.inf]
+
+            def params_to_canonical(p):
+                return [0.0, p[0], p[1], p[2], p[3], 0.0, p[4]]
 
         else:
             if len(init_params) != 4:
@@ -274,12 +346,12 @@ class EisLogic:
                     "[HFR, R_CL, Q_dl, Phi]."
                 )
             hfr_init = init_params[0]
-            lower_bounds = [0.9 * hfr_init, 0.0, 0.0, 0.0]
+            lower_bounds = [0.9 * hfr_init, 1e-12, 1e-12, 0.0]
             upper_bounds = [1.1 * hfr_init, np.inf, np.inf, 1.0]
 
             def params_to_canonical(p):
                 # Pad with L_wire=0 (front) and Theta=0 (back).
-                return [0.0, p[0], p[1], p[2], p[3], 0.0]
+                return [0.0, p[0], p[1], p[2], p[3], 0.0, np.inf]
 
         def cost_func(params):
             Z_model = self.evaluate_model(model_name, params_to_canonical(params), freq)
@@ -299,6 +371,7 @@ class EisLogic:
                 trial_init = self._perturb_init_params(
                     init_params, lower_bounds, upper_bounds, rng,
                     fit_inductance=fit_inductance,
+                    fit_faradaic=fit_faradaic,
                 )
 
             try:
@@ -337,20 +410,23 @@ class EisLogic:
                 + "; ".join(attempt_messages[:4])
             )
 
-        # Indices of HFR and R_CL within the optimizer's working vector — depend on
-        # which path we're on. Canonical 6-vector indices are HFR=1, R_CL=2.
+        # Indices of HFR/R_CL within the optimizer's working vector.
         hfr_idx = 1 if fit_inductance else 0
         rcl_idx = 2 if fit_inductance else 1
 
-        # --- Ranking: parameter accuracy on HFR and R_CL ---
+        # --- Ranking: parameter accuracy on HFR and R_CL only ---
         # The score is the worst (largest) of the relative standard errors on
-        # HFR and R_CL. SSR-sanity gate excludes restarts that clearly sit in a
-        # worse local minimum, since SE is only meaningful at a good fit.
-        def hfr_rcl_score(a):
+        # the two core resistance parameters. R_k is intentionally excluded —
+        # its SE often dominates in Faradaic fits without improving the fit
+        # itself. SSR-sanity gate excludes restarts that clearly sit in a worse
+        # local minimum, since SE is only meaningful at a good fit.
+        def resistance_score(a):
             p, s = a["params"], a["se"]
-            hfr_rel = (s[hfr_idx] / abs(p[hfr_idx])) if p[hfr_idx] != 0 else np.inf
-            rcl_rel = (s[rcl_idx] / abs(p[rcl_idx])) if p[rcl_idx] != 0 else np.inf
-            score = max(hfr_rel, rcl_rel)
+            rel_errors = [
+                (s[hfr_idx] / abs(p[hfr_idx])) if p[hfr_idx] != 0 else np.inf,
+                (s[rcl_idx] / abs(p[rcl_idx])) if p[rcl_idx] != 0 else np.inf,
+            ]
+            score = max(rel_errors)
             return score if np.isfinite(score) else np.inf
 
         best_ssr = min(a["ssr"] for a in attempts)
@@ -364,21 +440,34 @@ class EisLogic:
             eligible = attempts
             ranking_basis = "ssr_fallback"
 
-        best = min(eligible, key=hfr_rcl_score)
+        best = min(eligible, key=resistance_score)
         res = best["res"]
         se = best["se"]
         ssr = best["ssr"]
 
-        # Canonical 6-vector return so the UI/export indexing is stable across paths.
-        if fit_inductance:
+        # Canonical 7-vector return so the UI/export indexing is stable.
+        if fit_inductance and fit_faradaic:
             params_canonical = np.asarray(res.x, dtype=float)
             se_canonical = np.asarray(se, dtype=float)
-        else:
+        elif fit_inductance:
             params_canonical = np.array(
-                [0.0, res.x[0], res.x[1], res.x[2], res.x[3], 0.0], dtype=float,
+                [res.x[0], res.x[1], res.x[2], res.x[3], res.x[4], res.x[5], np.inf],
+                dtype=float,
+            )
+            se_canonical = np.array([se[0], se[1], se[2], se[3], se[4], se[5], 0.0], dtype=float)
+        elif fit_faradaic:
+            params_canonical = np.array(
+                [0.0, res.x[0], res.x[1], res.x[2], res.x[3], 0.0, res.x[4]], dtype=float,
             )
             se_canonical = np.array(
-                [0.0, se[0], se[1], se[2], se[3], 0.0], dtype=float,
+                [0.0, se[0], se[1], se[2], se[3], 0.0, se[4]], dtype=float,
+            )
+        else:
+            params_canonical = np.array(
+                [0.0, res.x[0], res.x[1], res.x[2], res.x[3], 0.0, np.inf], dtype=float,
+            )
+            se_canonical = np.array(
+                [0.0, se[0], se[1], se[2], se[3], 0.0, 0.0], dtype=float,
             )
 
         info = {
@@ -392,8 +481,9 @@ class EisLogic:
             "message": res.message,
             "nfev": int(res.nfev),
             "ranking_basis": ranking_basis,
-            "score_hfr_rcl_pct": hfr_rcl_score(best) * 100.0,
+            "score_hfr_rcl_pct": resistance_score(best) * 100.0,
             "fit_inductance": bool(fit_inductance),
+            "fit_faradaic": bool(fit_faradaic),
         }
 
         return (params_canonical, se_canonical, cost_func(res.x), info), None
