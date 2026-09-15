@@ -48,7 +48,6 @@ This module is a heavily customized version of the [NREL Open Source Impedance F
 4. **Explore (Optional):** Switch to the **Simulate** tab to perturb the fitted parameters and see how the model curve responds. Fitted values auto-populate after a fit; tweak any of the seven entries, optionally adjust the **f_min / f_max / Points** frequency-range fields, and click **"Simulate"** to redraw. Click **"Sync from fit"** to reset the entries to the latest fit values. Raw measured data points falling inside the chosen frequency window are overlaid on the four panels for direct comparison.
 5. **Export:** Click **"Export results…"** to generate an Excel workbook containing the raw/diagnostic data, the averaged dataset, the fitted curve coordinates, and the final parameter table.
 
-> The control column is scrollable — use the mouse wheel inside the left panel if the window is too short to show everything at once.
 
 ### The Underlying Logic & Math
 * **Multi-start with parameter-accuracy ranking:** Every restart's covariance is computed; the winner minimises $\max(\mathrm{SE}_{HFR}/|HFR|,\ \mathrm{SE}_{R_{cl}}/|R_{cl}|)$ among restarts within the SSR-sanity gate. The score deliberately ignores $R_k$ even for Faradaic fits — its SE is often loosely constrained and would otherwise dominate the ranking without reflecting actual fit quality. This biases the choice toward fits that *determine* $HFR$ and $R_{cl}$ rather than fits that merely chase the residual.
@@ -68,7 +67,6 @@ This module is a heavily customized version of the [NREL Open Source Impedance F
      and when $R_k\to\infty$, it reduces to the non-Faradaic transmission-line model above.
   3. **1-D Linear Diffusion (Finite-Length Warburg, transmissive boundary):** For planar / film electrodes whose far boundary acts as a sink for the diffusing species.
      $$Z(\omega)=HFR+\sqrt{\frac{R_{cl}}{Q_{dl}(j\omega)^{\phi}}}\;\tanh\left(\sqrt{R_{cl}\,Q_{dl}(j\omega)^{\phi}}\right)$$
-     > Note: upstream OSIF 2.0 wrote this branch with $\coth$ instead of $\tanh$, which makes it algebraically identical to the Transmission Line form. The expression above uses $\tanh$ — the "finite-length Warburg short" / Diard–Le Gorrec–Montella convention — so that the Linear and Transmission-Line models give physically distinct curves.
   4. **1-D Spherical Diffusion (restricted, reflecting boundary):** For nanoparticles or restricted spherical diffusion.
      $$Z(\omega)=HFR+\frac{R_{cl}}{\sqrt{R_{cl}\,Q_{dl}(j\omega)^{\phi}}\;\coth\left(\sqrt{R_{cl}\,Q_{dl}(j\omega)^{\phi}}\right)-1}$$
 
