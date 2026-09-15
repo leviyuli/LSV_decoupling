@@ -1,11 +1,13 @@
 import os
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+from typing import Any, cast
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.backends._backend_tk import NavigationToolbar2Tk
+from matplotlib.figure import Figure
 from matplotlib.widgets import Slider
 
 from core.data_io import read_lsv_data
@@ -23,7 +25,8 @@ class LsvUI(ttk.Frame):
         super().__init__(master)
 
         # --- Data holders ---
-        self.filename = None
+        self.filenames = ()
+        self._raw_cache = None  # tuple (filenames_tuple, V_raw, i_raw, info)
         self.V_data = None
         self.i_data = None
         self.E_rev = None
@@ -69,11 +72,11 @@ class LsvUI(ttk.Frame):
         # File Loading
         file_frame = ttk.LabelFrame(left_panel, text="Data")
         file_frame.pack(fill=tk.X, pady=(0, 8))
-        ttk.Button(file_frame, text="Load LSV File", command=self.load_file,
+        ttk.Button(file_frame, text="Load LSV File(s)…", command=self.load_file,
                    style="Accent.TButton").pack(fill=tk.X)
         self.lbl_status = ttk.Label(file_frame, text="No file selected.",
-                                    style="Hint.TLabel")
-        self.lbl_status.pack(anchor="w", pady=(6, 0))
+                                    style="Hint.TLabel", justify="left")
+        self.lbl_status.pack(anchor="w", pady=(6, 0), fill=tk.X)
 
         # Ref & Electrolyte
         ref_frame = ttk.LabelFrame(left_panel, text="Electrolyte & Reference")
@@ -168,7 +171,7 @@ class LsvUI(ttk.Frame):
         self.tab_plot = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_plot, text="Decoupled curves")
 
-        self.fig = plt.Figure(figsize=(8, 6))
+        self.fig = Figure(figsize=(8, 6))
         self.fig.patch.set_facecolor(BG)
         self.ax = self.fig.add_subplot(111)
         style_axes(self.ax)
@@ -185,11 +188,11 @@ class LsvUI(ttk.Frame):
         self.tab_bar = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_bar, text="Overpotential breakdown")
 
-        self.fig_bar = plt.Figure(figsize=(9, 5))
+        self.fig_bar = Figure(figsize=(9, 5))
         self.fig_bar.patch.set_facecolor(BG)
         # Two areas: main bar on top, slider strip on the bottom
-        self.ax_bar = self.fig_bar.add_axes([0.08, 0.32, 0.88, 0.55])
-        self.ax_slider = self.fig_bar.add_axes([0.12, 0.10, 0.80, 0.05])
+        self.ax_bar = self.fig_bar.add_axes((0.08, 0.32, 0.88, 0.55))
+        self.ax_slider = self.fig_bar.add_axes((0.12, 0.10, 0.80, 0.05))
         self.canvas_bar = FigureCanvasTkAgg(self.fig_bar, master=self.tab_bar)
         self.canvas_bar.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
@@ -215,10 +218,43 @@ class LsvUI(ttk.Frame):
     # File / diagnostics helpers
     # ------------------------------------------------------------------
     def load_file(self):
-        filepath = filedialog.askopenfilename(filetypes=[("Data files", "*.xlsx *.txt *.csv")])
-        if filepath:
-            self.filename = filepath
-            self.lbl_status.config(text=os.path.basename(filepath))
+        paths = filedialog.askopenfilenames(filetypes=[("Data files", "*.xlsx *.txt *.csv")])
+        if not paths:
+            return
+        self.filenames = tuple(paths)
+        self._raw_cache = None
+        # Parse immediately so the status label reflects what was detected
+        # (and to surface header / unit issues before the user hits Fit).
+        result, err = read_lsv_data(list(self.filenames))
+        if result is None:
+            self.lbl_status.config(text=f"Load error:\n{err}")
+            self.filenames = ()
+            messagebox.showerror("File Error", err or "Could not load the selected data.")
+            return
+        V_raw, i_raw, info = result
+        self._raw_cache = (self.filenames, V_raw, i_raw, info)
+        self.lbl_status.config(text=self._format_load_status(info))
+        if info.get('warning'):
+            messagebox.showwarning("Load Warning", info['warning'])
+
+    def _format_load_status(self, info):
+        files = info.get('files', [])
+        n = len(files)
+        if n == 1:
+            line1 = files[0].get('file', '?')
+        else:
+            line1 = f"{n} files loaded"
+        line2 = f"Columns: {info.get('v_col', 'E')}, {info.get('i_col', 'i')}"
+        notes = []
+        if info.get('averaged'):
+            notes.append("averaged")
+        if info.get('sweep_trimmed'):
+            notes.append("forward sweep")
+        if info.get('is_density') is False:
+            notes.append("⚠ absolute current")
+        suffix = f" · {' · '.join(notes)}" if notes else ""
+        line3 = f"{info.get('n_rows', 0)} points{suffix}"
+        return "\n".join([line1, line2, line3])
 
     def write_diag(self, text):
         self.diag_text.config(state=tk.NORMAL)
@@ -230,7 +266,7 @@ class LsvUI(ttk.Frame):
     # Fitting
     # ------------------------------------------------------------------
     def perform_fit(self):
-        if not self.filename:
+        if not self.filenames:
             messagebox.showerror("Error", "No file selected.")
             return
 
@@ -248,12 +284,15 @@ class LsvUI(ttk.Frame):
             messagebox.showerror("Input Error", "Please enter numeric values for all parameters.")
             return
 
-        data, err = read_lsv_data(self.filename)
-        if err:
-            messagebox.showerror("File Error", err)
-            return
-
-        V_raw, i_raw = data
+        if self._raw_cache and self._raw_cache[0] == self.filenames:
+            _, V_raw, i_raw, _ = self._raw_cache
+        else:
+            data, err = read_lsv_data(list(self.filenames))
+            if data is None:
+                messagebox.showerror("File Error", err or "Could not load the selected data.")
+                return
+            V_raw, i_raw, info = data
+            self._raw_cache = (self.filenames, V_raw, i_raw, info)
         self.E_rev = 1.2291 - 0.0008456 * (T - 298.15)
         offset = self.reference_options[self.ref_var.get()]
         V_corr = V_raw if self.ref_var.get() == "RHE" else (V_raw + 0.0592 * pH_val + offset)
@@ -272,6 +311,7 @@ class LsvUI(ttk.Frame):
             messagebox.showwarning("Fitting Warning", warn_err)
 
         fit_result, eta_ohm_all, eta_rcl_all, _ = result
+        fit_result = cast(dict[str, Any], fit_result)
         b_kin, i0 = fit_result["b_kin"], fit_result["i0"]
         self.fit_results = fit_result
 
@@ -316,6 +356,10 @@ class LsvUI(ttk.Frame):
     # Decoupled plot (curves)
     # ------------------------------------------------------------------
     def _plot_curves(self):
+        if (self.i_data is None or self.y1 is None or self.y2 is None
+                or self.y3 is None or self.y4 is None or self.y5 is None
+                or self.y6 is None):
+            return
         ax = self.ax
         ax.clear()
         style_axes(ax)
@@ -369,7 +413,7 @@ class LsvUI(ttk.Frame):
 
     def _on_curve_click(self, event):
         """Set the breakdown target current by clicking on the curve plot."""
-        if event.inaxes is not self.ax or self.fit_results is None:
+        if event.inaxes is not self.ax or self.fit_results is None or self.i_data is None:
             return
         if event.xdata is None or event.xdata <= 0:
             return
@@ -390,7 +434,8 @@ class LsvUI(ttk.Frame):
 
     def _draw_target_marker(self, target_i):
         """Draw a dotted vertical line + dot on the curves plot."""
-        if self.i_data is None or self.fit_results is None:
+        if (self.i_data is None or self.V_data is None
+                or self.fit_results is None):
             return
         sort_idx = np.argsort(self.i_data)
         i_sorted = self.i_data[sort_idx]
@@ -466,7 +511,8 @@ class LsvUI(ttk.Frame):
         self._draw_target_marker(target)
 
     def update_bar_plot(self, auto_focus=True):
-        if self.fit_results is None:
+        if (self.fit_results is None or self.i_data is None
+                or self.V_data is None or self.E_rev is None):
             if auto_focus:
                 messagebox.showerror("Error", "Perform a fit first.")
             return
@@ -496,6 +542,9 @@ class LsvUI(ttk.Frame):
 
     def _render_breakdown(self, target_i):
         """Render the wide horizontal stacked bar for the given target current."""
+        if (self.i_data is None or self.V_data is None
+                or self.E_rev is None or self.fit_results is None):
+            return
         try:
             HFR = float(self.hfr_entry.get())
             R_CL = float(self.rcl_entry.get())
